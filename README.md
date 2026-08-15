@@ -662,20 +662,78 @@ python C:\apps\appIT\app.py
 
 ### Faire tourner les applications en continu (tâche planifiée plutôt qu'un outil tiers)
 
+Première version : tâches planifiées sous le compte **SYSTEM**, le plus simple à mettre en place mais disproportionné en privilèges pour servir une page de statut. Corrigé ensuite avec un compte de service dédié par application, sur le même principe que `svc-cifsmount` en section 4.
+
+**Comptes de service, un par application, droits minimaux**
+
+```powershell
+New-ADUser -Name "svc-appit" `
+  -SamAccountName "svc-appit" `
+  -UserPrincipalName "svc-appit@lab.local" `
+  -AccountPassword (ConvertTo-SecureString "<mot_de_passe_fort>" -AsPlainText -Force) `
+  -Enabled $true -PasswordNeverExpires $true -CannotChangePassword $true
+
+New-ADUser -Name "svc-appcompta" `
+  -SamAccountName "svc-appcompta" `
+  -UserPrincipalName "svc-appcompta@lab.local" `
+  -AccountPassword (ConvertTo-SecureString "<mot_de_passe_fort>" -AsPlainText -Force) `
+  -Enabled $true -PasswordNeverExpires $true -CannotChangePassword $true
+```
+
+`svc-appit` a besoin de lire les données WSUS, `svc-appcompta` n'a besoin d'aucun droit particulier (page statique) :
+
+```powershell
+Enter-PSSession -ComputerName Beta-win
+Add-LocalGroupMember -Group "WSUS Reporters" -Member "LAB\svc-appit"
+```
+
+**Tâches planifiées, avec ces comptes plutôt que SYSTEM**
+
 ```powershell
 $action = New-ScheduledTaskAction -Execute "python.exe" -Argument "C:\apps\appIT\app.py"
 $trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName "PythonAppIT" -Action $action -Trigger $trigger -Principal $principal
+Register-ScheduledTask -TaskName "PythonAppIT" -Action $action -Trigger $trigger -User "LAB\svc-appit" -Password "<mot_de_passe_fort>" -RunLevel Limited
 Start-ScheduledTask -TaskName "PythonAppIT"
 
-# Même principe pour appCompta, sur le port 5002
 $action2 = New-ScheduledTaskAction -Execute "python.exe" -Argument "C:\apps\appCompta\app.py"
-Register-ScheduledTask -TaskName "PythonAppCompta" -Action $action2 -Trigger $trigger -Principal $principal
+Register-ScheduledTask -TaskName "PythonAppCompta" -Action $action2 -Trigger $trigger -User "LAB\svc-appcompta" -Password "<mot_de_passe_fort>" -RunLevel Limited
 Start-ScheduledTask -TaskName "PythonAppCompta"
 
 Get-ScheduledTaskInfo -TaskName "PythonAppIT"
 ```
+
+> **Piège rencontré** : au premier lancement, `LastTaskResult` renvoyait `267011` (`0x80070569`, `ERROR_LOGON_TYPE_NOT_GRANTED`) et les deux tâches refusaient de démarrer. Le vrai message, trouvé dans le journal dédié plutôt que deviné :
+> ```powershell
+> Get-WinEvent -LogName "Microsoft-Windows-TaskScheduler/Operational" -MaxEvents 30 |
+>   Where-Object { $_.Message -like "*PythonAppIT*" } |
+>   Select-Object TimeCreated, Id, LevelDisplayName, Message | Format-List
+> ```
+> Cause : le droit **"Ouvrir une session en tant que tâche batch"** (`SeBatchLogonRight`) n'est pas accordé par défaut à un compte de domaine standard, contrairement à l'ouverture de session interactive. C'est un type de logon distinct, avec sa propre restriction de sécurité. SYSTEM en était exempté nativement, ce qui masquait le problème tant qu'on l'utilisait.
+
+**Correction, via la stratégie de sécurité locale (pas de `secpol.msc` en Core)**
+
+```powershell
+$sidIT = (Get-ADUser svc-appit).SID.Value
+$sidCompta = (Get-ADUser svc-appcompta).SID.Value
+
+New-Item -Path "C:\temp" -ItemType Directory -Force
+secedit /export /cfg C:\temp\secpol.cfg /areas USER_RIGHTS
+
+(Get-Content C:\temp\secpol.cfg) -replace '(SeBatchLogonRight = .*)', "`$1,*$sidIT,*$sidCompta" | Set-Content C:\temp\secpol.cfg
+
+secedit /configure /db C:\Windows\security\local.sdb /cfg C:\temp\secpol.cfg /areas USER_RIGHTS
+
+Start-ScheduledTask -TaskName "PythonAppIT"
+Start-ScheduledTask -TaskName "PythonAppCompta"
+```
+
+**Vérification finale : le propriétaire réel des processus, pas juste la configuration déclarée**
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Select-Object ProcessId, @{N="Owner";E={(Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User}}
+```
+Doit afficher `svc-appit` et `svc-appcompta`, plus `Système`.
 
 ### Applications IIS isolées, une par service, avec authentification et permissions propres
 
@@ -811,7 +869,12 @@ scrape_configs:
 docker restart prometheus
 ```
 
-Dashboard Grafana construit sur mesure pour ce lab (statut serveurs en timeline, CPU/mémoire/disque, réseau, latence AD, historique des services critiques, requêtes IIS), plutôt qu'un template communautaire générique.
+Dashboard Grafana construit sur mesure pour ce lab (statut serveurs en timeline, CPU/mémoire/disque, réseau, latence AD, historique des services critiques, requêtes IIS), plutôt qu'un template communautaire générique. JSON importable directement dans Grafana : [`grafana/dashboard-windows-lab.json`](grafana/dashboard-windows-lab.json).
+
+```powershell
+# Dans Grafana : Dashboards > New > Import, puis charger le fichier ci-dessus
+# et sélectionner la source de données Prometheus lors de l'import
+```
 
 ![Dashboard Grafana du lab](docs/grafana.png)
 
