@@ -967,17 +967,59 @@ Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
 ```
 
 ### Revue du pare-feu
-
+ 
 ```powershell
 # Lister uniquement les règles actives et personnalisées (exclut les règles système par défaut)
 Get-NetFirewallRule -Direction Inbound -Enabled True | Where-Object { $_.DisplayName -notlike "*@*" } | Select-Object DisplayName, Action
-
-# Désactiver les catégories inutiles sur un serveur (découverte réseau, streaming, mDNS, etc.)
-Get-NetFirewallRule -DisplayName "Découverte de réseau*" | Disable-NetFirewallRule
-Get-NetFirewallRule -DisplayName "mDNS*" | Disable-NetFirewallRule
-# ... (répéter pour chaque catégorie identifiée comme inutile)
 ```
-
+ 
+**Sur Alpha-win**, catégories désactivées après revue de la liste complète :
+ 
+```powershell
+# Découverte de réseau (WSD/SSDP/UPnP), différent du partage de fichiers, inutile sur un serveur
+Get-NetFirewallRule -DisplayName "Découverte de réseau*", "Découverte du réseau*" | Disable-NetFirewallRule
+ 
+# Diffusion/streaming vers un appareil, aucun usage sur un serveur
+Get-NetFirewallRule -DisplayName "Serveur de diffusion en continu*", "Fonctionnalité Diffuser sur un appareil*", "Découverte SSDP Diffuser sur un appareil*", "Événements UPnP Diffuser sur un appareil*", "Source réseau Microsoft Media Foundation*" | Disable-NetFirewallRule
+ 
+# Protocole DIAL (cast vers TV/Chromecast)
+Get-NetFirewallRule -DisplayName "Serveur protocole DIAL*" | Disable-NetFirewallRule
+ 
+# AllJoyn, protocole IoT, sans usage ici
+Get-NetFirewallRule -DisplayName "Routeur AllJoyn*" | Disable-NetFirewallRule
+ 
+# mDNS (Bonjour/Apple), inutile sur un contrôleur de domaine
+Get-NetFirewallRule -DisplayName "mDNS*" | Disable-NetFirewallRule
+ 
+# Optimisation de livraison (P2P Windows Update), redondant puisque WSUS centralise déjà
+Get-NetFirewallRule -DisplayName "Optimisation de livraison*" | Disable-NetFirewallRule
+ 
+# Règles d'applications UWP/Store, hors sujet sur un serveur
+Get-NetFirewallRule -DisplayName "Votre compte", "Compte professionnel ou scolaire", "Démarrage", "Windows Search", "Visionneuse web de l'application de bureau", "Microsoft Edge (mDNS-In)" | Disable-NetFirewallRule
+ 
+# Technologies de transition IPv6 et multicast non utilisées dans ce lab
+Get-NetFirewallRule -DisplayName "Gestion réseau de base - Internet Group Management Protocol*", "Gestion réseau de base - Teredo*", "Réseau de base - IPHTTPS*" | Disable-NetFirewallRule
+```
+ 
+Résultat : 8 catégories de règles désactivées, 70 règles actives et personnalisées restantes, l'essentiel étant AD/Kerberos/LDAP/DFS, partage de fichiers, administration à distance et sauvegarde.
+ 
+**Sur Beta-win**, moins de bruit au départ (pas de couche desktop en Server Core), le sous-ensemble suivant a suffi :
+ 
+```powershell
+Get-NetFirewallRule -DisplayName "mDNS*" | Disable-NetFirewallRule
+Get-NetFirewallRule -DisplayName "Routeur AllJoyn*" | Disable-NetFirewallRule
+Get-NetFirewallRule -DisplayName "Optimisation de livraison*" | Disable-NetFirewallRule
+Get-NetFirewallRule -DisplayName "Gestion réseau de base - Teredo*", "Réseau de base - IPHTTPS*" | Disable-NetFirewallRule
+Get-NetFirewallRule -DisplayName "Gestion réseau de base - Internet Group Management Protocol*" | Disable-NetFirewallRule
+```
+ 
+Résultat : 5 catégories de règles désactivées, 38 règles actives et personnalisées restantes (WinRM, partage de fichiers, WSUS, IIS, windows_exporter, administration à distance).
+ 
+```powershell
+# Vérifier le nombre de règles restantes après nettoyage
+Get-NetFirewallRule -Direction Inbound -Enabled True | Where-Object { $_.DisplayName -notlike "*@*" } | Measure-Object
+```
+ 
 > Toujours retester les services critiques après ce nettoyage (accès au partage de fichiers, WSUS, IIS) avant de considérer le pare-feu comme validé.
 
 ### Vérification du compte de service (moindre privilège)
